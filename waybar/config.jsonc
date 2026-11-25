@@ -1,0 +1,15 @@
+// Add this module to your Waybar config (~/.config/waybar/config.jsonc)
+{
+  "modules-center": [
+    "clock",
+    "custom/prayer-times"
+  ],
+
+  "custom/prayer-times": {
+    "exec": "~/.local/bin/prayer-times",
+    "return-type": "json",
+    "interval": 60,
+    "on-click": "~/.local/bin/prayer-times --notify",
+    "on-click-right": "~/.local/bin/prayer-times --refresh"
+  }
+}

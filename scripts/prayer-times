@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""
+Islamic Prayer Times Bar Widget & CLI
+Works with:
+  - Omarchy 4.0 Bar (native QML plugin or command module)
+  - Waybar (custom JSON module with .now / .close / .far CSS classes)
+  - Polybar / Hyprpanel / tmux / terminal (--plain / --table)
+
+3-State Color System:
+  - NOW:   Active Salah window (default first 20 min) -> #50FA7B (green)
+  - CLOSE: Approaching within 30 min               -> #FAB387 (amber)
+  - FAR:   More than 30 min away                   -> theme default
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta
+
+DEFAULT_CITY = "Al-Karak"
+DEFAULT_COUNTRY = "Jordan"
+DEFAULT_METHOD = "JORDAN"
+
+COLOR_NOW = "#50FA7B"
+COLOR_CLOSE = "#FAB387"
+COLOR_FAR = ""
+
+CONFIG_PATHS = [
+    os.path.expanduser("~/.config/prayer-times.json"),
+    os.path.expanduser("~/.config/omarchy/prayer-times.json"),
+]
+
+CACHE_DIR = os.path.expanduser("~/.cache/prayer-times")
+CACHE_FILE = os.path.join(CACHE_DIR, "timings_cache.json")
+NOTIF_STATE_FILE = os.path.join(CACHE_DIR, "notif_sent.json")
+
+PRAYERS = [
+    ("Fajr", "الفجر", "06:01", True),
+    ("Sunrise", "الشروق", "07:11", False),
+    ("Dhuhr", "الظهر", "12:24", True),
+    ("Asr", "العصر", "15:17", True),
+    ("Maghrib", "المغرب", "17:36", True),
+    ("Isha", "العشاء", "18:46", True),
+]
+
+
+def load_config(args):
+    cfg = {
+        "city": DEFAULT_CITY,
+        "country": DEFAULT_COUNTRY,
+        "method": DEFAULT_METHOD,
+        "now_window": 20,
+        "close_threshold": 30,
+        "now_color": COLOR_NOW,
+        "close_color": COLOR_CLOSE,
+    }
+    for path in CONFIG_PATHS:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    user_cfg = json.load(f)
+                for key in cfg:
+                    if user_cfg.get(key) not in (None, ""):
+                        cfg[key] = user_cfg[key]
+                break
+            except Exception:
+                pass
+
+    cfg["city"] = os.environ.get("PRAYER_CITY", cfg["city"])
+    cfg["country"] = os.environ.get("PRAYER_COUNTRY", cfg["country"])
+    cfg["method"] = os.environ.get("PRAYER_METHOD", cfg["method"])
+
+    if args.city:
+        cfg["city"] = args.city
+    if args.country:
+        cfg["country"] = args.country
+    if args.method:
+        cfg["method"] = args.method
+    if args.now_window is not None:
+        cfg["now_window"] = args.now_window
+    if args.close_threshold is not None:
+        cfg["close_threshold"] = args.close_threshold
+
+    return cfg
+
+
+def fetch_timings(city, country, method, force=False):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    if not force and os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if (
+                data.get("date") == today_str
+                and data.get("city") == city
+                and data.get("country") == country
+                and str(data.get("method")) == str(method)
+                and "timings" in data
+            ):
+                return data["timings"]
+        except Exception:
+            pass
+
+    try:
+        query = urllib.parse.urlencode({"city": city, "country": country, "method": method})
+        url = f"https://api.aladhan.com/v1/timingsByCity?{query}"
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 (compatible; prayer-times/1.0)"}
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            res = json.loads(resp.read().decode("utf-8"))
+        timings = res.get("data", {}).get("timings", {})
+        if timings:
+            payload = {
+                "date": today_str,
+                "city": city,
+                "country": country,
+                "method": method,
+                "timings": timings,
+                "fetched_at": datetime.now().isoformat(),
+            }
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            return timings
+    except Exception:
+        if os.path.exists(CACHE_FILE):
+            try:
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if "timings" in data:
+                    return data["timings"]
+            except Exception:
+                pass
+
+    return {en: fb for en, _, fb, _ in PRAYERS}
+
+
+def get_prayer_status(timings, cfg):
+    now = datetime.now()
+    today = now.date()
+    now_window = int(cfg["now_window"])
+    close_threshold = int(cfg["close_threshold"])
+
+    parsed = []
+    for en, ar, fallback, is_salah in PRAYERS:
+        raw_val = str(timings.get(en, fallback)).split(" ")[0]
+        try:
+            h, m = map(int, raw_val.split(":")[:2])
+            dt = datetime(today.year, today.month, today.day, h, m)
+        except Exception:
+            h, m = 12, 0
+            dt = datetime(today.year, today.month, today.day, h, m)
+        parsed.append((en, ar, dt, f"{h:02d}:{m:02d}", is_salah))
+
+    now_prayer = None
+    for en, ar, dt, fmt, is_salah in parsed:
+        if is_salah:
+            diff_secs = (now - dt).total_seconds()
+            if 0 <= diff_secs <= now_window * 60:
+                mins_in = int(diff_secs // 60)
+                now_prayer = (en, ar, fmt, mins_in)
+                break
+
+    next_event = None
+    rem = None
+    for en, ar, dt, fmt, is_salah in parsed:
+        if dt > now:
+            next_event = (en, ar, fmt, is_salah)
+            rem = dt - now
+            break
+
+    if not next_event:
+        en0, ar0, dt0, fmt0, is_salah0 = parsed[0]
+        next_event = (en0, ar0, fmt0, is_salah0)
+        rem = (dt0 + timedelta(days=1)) - now
+
+    next_en, next_ar, next_fmt, _ = next_event
+    total_secs = max(0, int(rem.total_seconds()))
+    hours = total_secs // 3600
+    mins = (total_secs % 3600) // 60
+    rem_str = f"{hours}h {mins}m" if hours > 0 else f"{mins}m"
+
+    if now_prayer:
+        state = "now"
+        en, ar, fmt, mins_in = now_prayer
+        time_tag = f" (+{mins_in}m)" if mins_in > 0 else ""
+        bar_text = f"󱡖 {en} NOW{time_tag}"
+        color = cfg["now_color"]
+    elif total_secs <= close_threshold * 60:
+        state = "close"
+        bar_text = f"󱡖 {next_en} {next_fmt} ({rem_str})"
+        color = cfg["close_color"]
+    else:
+        state = "far"
+        bar_text = f"󱡖 {next_en} {next_fmt}"
+        color = COLOR_FAR
+
+    return parsed, now_prayer, next_event, rem_str, state, bar_text, color
+
+
+def send_notification(title, body):
+    try:
+        subprocess.run(["notify-send", "-a", "Prayer Times", title, body], check=False)
+    except FileNotFoundError:
+        pass
+
+
+def check_auto_notification(state, now_prayer, cfg):
+    if state != "now" or not now_prayer:
+        return
+    en, ar, fmt, _ = now_prayer
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    key = f"{today_str}_{en}"
+
+    sent_keys = []
+    if os.path.exists(NOTIF_STATE_FILE):
+        try:
+            with open(NOTIF_STATE_FILE, "r", encoding="utf-8") as f:
+                sent_keys = json.load(f)
+        except Exception:
+            sent_keys = []
+
+    if key not in sent_keys:
+        send_notification(
+            f"🕌 It is now time for {en} ({ar})",
+            f"{cfg['city']}, {cfg['country']} — {fmt}",
+        )
+        sent_keys.append(key)
+        sent_keys = sent_keys[-20:]
+        try:
+            with open(NOTIF_STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(sent_keys, f)
+        except Exception:
+            pass
+
+
+def build_tooltip(parsed, now_prayer, next_event, rem_str, state, cfg, include_arabic=True):
+    next_en, next_ar, _, _ = next_event
+    lines = [
+        f"🕌 Islamic Prayer Times — {cfg['city']}, {cfg['country']}",
+        f"Method: {cfg['method']}",
+        "─────────────────────────",
+    ]
+    for en, ar, _, fmt, _ in parsed:
+        if now_prayer and now_prayer[0] == en:
+            marker = "🟢 NOW ▶"
+        elif not now_prayer and next_en == en:
+            marker = "🟡 NEXT ▶"
+        else:
+            marker = "       "
+        ar_part = f" ({ar})" if include_arabic else ""
+        lines.append(f"{marker} {en:<8}{ar_part}: {fmt}")
+
+    lines.append("─────────────────────────")
+    if state == "now":
+        en, ar, _, mins_in = now_prayer
+        ar_part = f" ({ar})" if include_arabic else ""
+        lines.append(f"🟢 Active: {en}{ar_part} prayer is NOW (+{mins_in}m elapsed)")
+    elif state == "close":
+        ar_part = f" ({next_ar})" if include_arabic else ""
+        lines.append(f"🟡 Upcoming: {next_en}{ar_part} in {rem_str} (Approaching)")
+    else:
+        ar_part = f" ({next_ar})" if include_arabic else ""
+        lines.append(f"⚪ Next: {next_en}{ar_part} in {rem_str}")
+
+    lines.append("(Click for notification • Right-click to refresh)")
+    return "\n".join(lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Islamic Prayer Times bar widget & CLI")
+    parser.add_argument("--city", help="City name (e.g. Al-Karak, Amman, London)")
+    parser.add_argument("--country", help="Country name (e.g. Jordan, UK)")
+    parser.add_argument("--method", help="AlAdhan calculation method (e.g. JORDAN, MWL, ISNA)")
+    parser.add_argument("--now-window", type=int, help="Minutes to show NOW green state")
+    parser.add_argument("--close-threshold", type=int, help="Minutes before prayer to show CLOSE amber state")
+    parser.add_argument("--refresh", action="store_true", help="Force refresh cache from AlAdhan API")
+    parser.add_argument("--notify", action="store_true", help="Send desktop notification with schedule")
+    parser.add_argument("--plain", action="store_true", help="Print plain text for Polybar/tmux")
+    parser.add_argument("--table", action="store_true", help="Print full timetable to stdout")
+    parser.add_argument("--no-arabic", action="store_true", help="Omit Arabic names")
+    parser.add_argument("--no-auto-notify", action="store_true", help="Disable automatic Adhan notification")
+    args = parser.parse_args()
+
+    cfg = load_config(args)
+    timings = fetch_timings(cfg["city"], cfg["country"], cfg["method"], force=args.refresh)
+    parsed, now_prayer, next_event, rem_str, state, bar_text, color = get_prayer_status(timings, cfg)
+    next_en, next_ar, next_fmt, _ = next_event
+    include_arabic = not args.no_arabic
+
+    if args.notify:
+        body_lines = [
+            f"{en}{f' ({ar})' if include_arabic else ''}: {fmt}"
+            for en, ar, _, fmt, _ in parsed
+        ]
+        if state == "now":
+            body_lines.append(f"\n🟢 PRAYER TIME NOW: {now_prayer[0]}")
+        else:
+            body_lines.append(f"\n▶ Next: {next_en} at {next_fmt} (in {rem_str})")
+        send_notification(f"Prayer Times — {cfg['city']}, {cfg['country']}", "\n".join(body_lines))
+        return
+
+    if args.table:
+        print(build_tooltip(parsed, now_prayer, next_event, rem_str, state, cfg, include_arabic))
+        return
+
+    if args.plain:
+        print(bar_text)
+        return
+
+    if not args.no_auto_notify:
+        check_auto_notification(state, now_prayer, cfg)
+
+    tooltip_text = build_tooltip(parsed, now_prayer, next_event, rem_str, state, cfg, include_arabic)
+    output = {
+        "text": bar_text,
+        "tooltip": tooltip_text,
+        "class": state,
+        "alt": state,
+        "color": color,
+    }
+    print(json.dumps(output))
+
+
+if __name__ == "__main__":
+    main()

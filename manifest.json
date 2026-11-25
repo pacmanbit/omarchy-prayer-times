@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "pacmanbit.prayer-times",
+  "name": "Islamic Prayer Times",
+  "version": "1.0.0",
+  "author": "pacmanbit",
+  "description": "Live Islamic prayer times for Omarchy Bar with NOW / CLOSE / FAR color states and Adhan notifications",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Islamic Prayer Times",
+    "description": "Displays the next Salah time, countdown, and full daily schedule",
+    "category": "Info",
+    "defaultSection": "center",
+    "allowMultiple": false
+  }
+}

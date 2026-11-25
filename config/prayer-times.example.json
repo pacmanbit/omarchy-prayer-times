@@ -1,0 +1,9 @@
+{
+  "city": "Al-Karak",
+  "country": "Jordan",
+  "method": "JORDAN",
+  "now_window": 20,
+  "close_threshold": 30,
+  "now_color": "#50FA7B",
+  "close_color": "#FAB387"
+}

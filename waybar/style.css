@@ -1,0 +1,20 @@
+/* Add to ~/.config/waybar/style.css */
+
+#custom-prayer-times {
+  padding: 0 10px;
+  transition: color 0.25s ease, background-color 0.25s ease;
+}
+
+#custom-prayer-times.now {
+  color: #50fa7b;
+  font-weight: bold;
+}
+
+#custom-prayer-times.close {
+  color: #fab387;
+  font-weight: 600;
+}
+
+#custom-prayer-times.far {
+  /* Inherits your default Waybar foreground color */
+}
